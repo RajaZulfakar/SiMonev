@@ -195,7 +195,7 @@ const Navbar = () => {
           <LayoutDashboard className="text-[var(--bg)] w-5 h-5 md:w-6 md:h-6" />
         </div>
         <div>
-          <h1 className="text-2xl md:text-3xl font-black tracking-tighter text-[var(--fg)] uppercase leading-none">E-MON</h1>
+          <h1 className="text-2xl md:text-3xl font-black tracking-tighter text-[var(--fg)] uppercase leading-none">E-MON <br /> BIMA KEPRI</h1>
           <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-gray-500 mt-0.5">BIMA KEPRI</p>
         </div>
       </Link>
@@ -855,16 +855,50 @@ const ProjectDetail = () => {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
   const fetchProject = () => {
-    const unsubProject = onSnapshot(doc(db, 'projects', id!), (docSnap) => {
+    const unsubProject = onSnapshot(doc(db, 'projects', id!), async (docSnap) => {
       if (docSnap.exists()) {
         const projectData = { id: docSnap.id, ...docSnap.data() };
         
-        // Fetch updates subcollection
-        const qUpdates = query(collection(db, 'projects', id!, 'updates'), orderBy('fisik_kumulatif', 'desc'));
-        onSnapshot(qUpdates, (updateSnap) => {
-          const updates = updateSnap.docs.map(u => ({ id: u.id, ...u.data() }));
-          setProject({ ...projectData, updates, photos: [] }); // Simplified photos for now
+        // Resolve bidang name - optimized mapping
+        const bSnap = await getDocs(collection(db, 'bidang'));
+        const bMap: any = {};
+        bSnap.docs.forEach(d => bMap[d.id] = d.data().nama_bidang);
+        
+        // Set initial project data first
+        setProject({
+          ...projectData,
+          nama_bidang: bMap[projectData.bidang_id] || 'SDA',
+          updates: [],
+          photos: []
         });
+
+        // Fetch updates subcollection
+        const qUpdates = query(collection(db, 'projects', id!, 'updates'), orderBy('created_at', 'desc'));
+        onSnapshot(qUpdates, (updateSnap) => {
+          const updates = updateSnap.docs.map(u => {
+            const data = u.data();
+            let dateVal = new Date();
+            if (data.created_at?.toDate) {
+              dateVal = data.created_at.toDate();
+            } else if (data.created_at) {
+              dateVal = new Date(data.created_at);
+            }
+            
+            return { 
+              id: u.id, 
+              ...data,
+              created_at: dateVal 
+            };
+          });
+          setProject({ 
+            ...projectData, 
+            nama_bidang: bMap[projectData.bidang_id] || 'SDA',
+            updates, 
+            photos: [] 
+          });
+        });
+      } else {
+        setProject(null);
       }
     });
     return unsubProject;
