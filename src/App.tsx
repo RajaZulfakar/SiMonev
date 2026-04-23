@@ -46,7 +46,9 @@ import {
   addDoc,
   orderBy,
   updateDoc,
-  deleteDoc
+  deleteDoc,
+  getDocs,
+  limit
 } from 'firebase/firestore';
 
 // --- Types ---
@@ -150,19 +152,25 @@ const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       const result = await signInWithPopup(firebaseAuth, googleProvider);
       const firebaseUser = result.user;
       
-      // For demo purposes, we automatically create/update the profile with the selected role
-      // In production, roles would be managed by an admin
-      const userData = {
-        name: firebaseUser.displayName || 'User',
-        email: firebaseUser.email || '',
-        role: role,
-        bidang_id: (role === 'operator' || role === 'kabid') ? 'bidang_sda' : null
-      };
-
-      await setDoc(doc(db, 'users', firebaseUser.uid), userData);
-      setUser({ id: firebaseUser.uid, ...userData } as any);
+      // Check if user already exists
+      const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+      
+      if (!userDoc.exists()) {
+        const userData = {
+          name: firebaseUser.displayName || 'User',
+          email: firebaseUser.email || '',
+          role: role,
+          bidang_id: (role === 'operator' || role === 'kabid') ? 'bidang_sda' : null
+        };
+        await setDoc(doc(db, 'users', firebaseUser.uid), userData);
+        setUser({ id: firebaseUser.uid, ...userData } as any);
+      } else {
+        // User exists, just update local state with existing data
+        setUser({ id: firebaseUser.uid, ...userDoc.data() } as any);
+      }
     } catch (error) {
       console.error("Login failed:", error);
+      alert("Gagal Login: " + (error as Error).message);
     }
   };
 
@@ -288,34 +296,45 @@ const Dashboard = () => {
   const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
-    // Listen to statistics from Firestore
-    const unsubscribeStats = onSnapshot(collection(db, 'projects'), (snapshot) => {
-      const allProjects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      const totalPaguValue = allProjects.reduce((acc: number, p: any) => acc + (p.pagu || 0), 0);
-      
-      // We'll calculate average progress based on latest verified updates (simplified logic for client side)
-      // In a real app, this might be a cloud function or pre-calculated field
-      setStats({
-        totalProjects: allProjects.length,
-        totalPagu: totalPaguValue,
-        avgProgress: 0 // Will update once we have more logic
+    // Fetch all bidang for mapping
+    let bidangMap: Record<string, string> = {};
+    onSnapshot(collection(db, 'bidang'), (snap) => {
+      snap.docs.forEach(doc => {
+        bidangMap[doc.id] = doc.data().nama_bidang;
       });
     });
 
     // Listen to projects from Firestore
-    const unsubscribeProjects = onSnapshot(collection(db, 'projects'), (snapshot) => {
-      const projectsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      
-      // For each project, fetch the latest update if available
-      // Note: Real-time listeners for nested collections can be complex, 
-      // but for dashboard preview we just need the info.
-      setProjects(projectsData as any);
-      
-      // Update average progress in stats context if needed
+    const unsubscribeProjects = onSnapshot(collection(db, 'projects'), async (snapshot) => {
+      const projectsBatch = await Promise.all(snapshot.docs.map(async (pDoc) => {
+        const pId = pDoc.id;
+        const pData = pDoc.data();
+        const qUpdate = query(collection(db, 'projects', pId, 'updates'), orderBy('created_at', 'desc'), limit(1));
+        const uSnap = await getDocs(qUpdate);
+        return { 
+          id: pId, 
+          ...pData,
+          nama_bidang: bidangMap[pData.bidang_id] || 'SDA', // Fallback or mapping
+          latestUpdate: uSnap.docs[0]?.data() || null 
+        };
+      }));
+      setProjects(projectsBatch as any);
+
+      // Calculate stats based on fetched projects with updates
+      const totalPaguValue = projectsBatch.reduce((acc, p: any) => acc + (p.pagu || 0), 0);
+      const verifiedProjects = projectsBatch.filter((p: any) => p.latestUpdate?.status_verifikasi === 1);
+      const avgProgressValue = verifiedProjects.length > 0 
+        ? verifiedProjects.reduce((acc, p: any) => acc + (p.latestUpdate?.fisik_kumulatif || 0), 0) / verifiedProjects.length
+        : 0;
+
+      setStats({
+        totalProjects: projectsBatch.length,
+        totalPagu: totalPaguValue,
+        avgProgress: avgProgressValue
+      });
     });
 
     return () => {
-      unsubscribeStats();
       unsubscribeProjects();
     };
   }, []);
@@ -668,11 +687,24 @@ const ProjectList = () => {
       q = query(collection(db, 'projects'), where('bidang_id', '==', user.bidang_id));
     }
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const projectsData = snapshot.docs.map(doc => ({ 
-        id: doc.id, 
-        ...doc.data() 
-      } as unknown as Project));
+    const unsubscribe = onSnapshot(q, async (snapshot) => {
+      // Fetch bidang names map
+      const bSnap = await getDocs(collection(db, 'bidang'));
+      const bMap: any = {};
+      bSnap.docs.forEach(d => bMap[d.id] = d.data().nama_bidang);
+
+      const projectsData = await Promise.all(snapshot.docs.map(async (pDoc) => {
+        const pId = pDoc.id;
+        const pData = pDoc.data();
+        const qUpdate = query(collection(db, 'projects', pId, 'updates'), orderBy('created_at', 'desc'), limit(1));
+        const uSnap = await getDocs(qUpdate);
+        return { 
+          id: pId, 
+          ...pData,
+          nama_bidang: bMap[pData.bidang_id] || 'SDA',
+          latestUpdate: uSnap.docs[0]?.data() || null 
+        } as unknown as Project;
+      }));
       setProjects(projectsData);
     });
 
