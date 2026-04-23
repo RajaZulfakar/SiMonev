@@ -1,0 +1,91 @@
+{
+  "entities": {
+    "Bidang": {
+      "title": "Bidang",
+      "description": "Bidang or department within the organization",
+      "type": "object",
+      "properties": {
+        "nama_bidang": { "type": "string" }
+      },
+      "required": ["nama_bidang"]
+    },
+    "User": {
+      "title": "User",
+      "description": "User of the application",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "operator", "kabid", "kadis"] },
+        "bidang_id": { "type": "string", "description": "Reference to Bidang document ID" }
+      },
+      "required": ["name", "email", "role"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "Infrastructure project details",
+      "type": "object",
+      "properties": {
+        "nama_paket": { "type": "string" },
+        "pagu": { "type": "number" },
+        "nilai_kontrak": { "type": "number" },
+        "tahun_anggaran": { "type": "number" },
+        "lokasi_kab_kota": { "type": "string" },
+        "lat": { "type": "number" },
+        "long": { "type": "number" },
+        "bidang_id": { "type": "string", "description": "Reference to Bidang document ID" },
+        "status_verifikasi": { "type": "number" }
+      },
+      "required": ["nama_paket", "pagu", "nilai_kontrak", "tahun_anggaran", "lokasi_kab_kota", "bidang_id"]
+    },
+    "ProgressUpdate": {
+      "title": "Progress Update",
+      "description": "Periodic progress report for a project",
+      "type": "object",
+      "properties": {
+        "project_id": { "type": "string" },
+        "fisik_kumulatif": { "type": "number" },
+        "keuangan_nominal": { "type": "number" },
+        "termin_ke": { "type": "number" },
+        "keterangan_kendala": { "type": "string" },
+        "solusi_saran": { "type": "string" },
+        "status_verifikasi": { "type": "number" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["project_id", "fisik_kumulatif", "keuangan_nominal", "termin_ke", "status_verifikasi"]
+    },
+    "ProjectPhoto": {
+      "title": "Project Photo",
+      "description": "Photo documentation for a progress update",
+      "type": "object",
+      "properties": {
+        "progress_id": { "type": "string" },
+        "foto_url": { "type": "string" },
+        "label": { "type": "string", "enum": ["0%", "50%", "100%"] }
+      },
+      "required": ["progress_id", "foto_url", "label"]
+    }
+  },
+  "firestore": {
+    "/bidang/{bidangId}": {
+      "schema": "Bidang",
+      "description": "List of departments"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Application users and roles"
+    },
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "Main projects collection"
+    },
+    "/projects/{projectId}/updates/{updateId}": {
+      "schema": "ProgressUpdate",
+      "description": "Progress updates for a specific project"
+    },
+    "/projects/{projectId}/updates/{updateId}/photos/{photoId}": {
+      "schema": "ProjectPhoto",
+      "description": "Photos for a specific update"
+    }
+  }
+}

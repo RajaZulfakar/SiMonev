@@ -27,6 +27,28 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+// --- Firebase imports ---
+import { auth as firebaseAuth, db, googleProvider, handleFirestoreError } from './firebase';
+import { 
+  onAuthStateChanged, 
+  signInWithPopup, 
+  signOut 
+} from 'firebase/auth';
+import { 
+  collection, 
+  onSnapshot, 
+  query, 
+  where, 
+  doc, 
+  getDoc, 
+  setDoc,
+  serverTimestamp,
+  addDoc,
+  orderBy,
+  updateDoc,
+  deleteDoc
+} from 'firebase/firestore';
+
 // --- Types ---
 import { Role, User, Project, ProgressUpdate } from './types';
 
@@ -95,31 +117,60 @@ const ThemeProvider = ({ children }: { children: React.ReactNode }) => {
 };
 
 const AuthProvider = ({ children }: { children: React.ReactNode }) => {
-  const [user, setUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem('simonev_user');
-    return saved ? JSON.parse(saved) : null;
-  });
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const login = (role: Role) => {
-    const mockUsers: Record<Role, User> = {
-      admin: { id: 1, name: 'Admin E-MON', email: 'admin@kepri.go.id', role: 'admin' },
-      operator: { id: 2, name: 'Operator SDA', email: 'operator@kepri.go.id', role: 'operator', bidang_id: 1 },
-      kabid: { id: 3, name: 'Kabid SDA', email: 'kabid@kepri.go.id', role: 'kabid', bidang_id: 1 },
-      kadis: { id: 4, name: 'Kadis PUPR', email: 'kadis@kepri.go.id', role: 'kadis' },
-    };
-    const newUser = mockUsers[role];
-    setUser(newUser);
-    localStorage.setItem('simonev_user', JSON.stringify(newUser));
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(firebaseAuth, async (firebaseUser) => {
+      if (firebaseUser) {
+        try {
+          const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+          if (userDoc.exists()) {
+            setUser({ id: firebaseUser.uid, ...userDoc.data() } as any);
+          } else {
+            // Default role for new users if needed, or handle profile creation
+            // For this app, we'll assume admins are pre-registered or assigned
+            setUser(null);
+          }
+        } catch (error) {
+          console.error("Error fetching user profile:", error);
+          setUser(null);
+        }
+      } else {
+        setUser(null);
+      }
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  const login = async (role: Role) => {
+    try {
+      const result = await signInWithPopup(firebaseAuth, googleProvider);
+      const firebaseUser = result.user;
+      
+      // For demo purposes, we automatically create/update the profile with the selected role
+      // In production, roles would be managed by an admin
+      const userData = {
+        name: firebaseUser.displayName || 'User',
+        email: firebaseUser.email || '',
+        role: role,
+        bidang_id: (role === 'operator' || role === 'kabid') ? 'bidang_sda' : null
+      };
+
+      await setDoc(doc(db, 'users', firebaseUser.uid), userData);
+      setUser({ id: firebaseUser.uid, ...userData } as any);
+    } catch (error) {
+      console.error("Login failed:", error);
+    }
   };
 
-  const logout = () => {
-    setUser(null);
-    localStorage.removeItem('simonev_user');
-  };
+  const logout = () => signOut(firebaseAuth);
 
   return (
     <AuthContext.Provider value={{ user, login, logout }}>
-      {children}
+      {!loading && children}
     </AuthContext.Provider>
   );
 };
@@ -237,15 +288,36 @@ const Dashboard = () => {
   const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
-    fetch('/api/dashboard/stats').then(res => res.json()).then(setStats);
-    fetch('/api/projects').then(res => res.json()).then(async (data) => {
-      const projectsWithUpdates = await Promise.all(data.map(async (p: any) => {
-        const res = await fetch(`/api/projects/${p.id}`);
-        const detail = await res.json();
-        return { ...p, latestUpdate: detail.updates[0] };
-      }));
-      setProjects(projectsWithUpdates);
+    // Listen to statistics from Firestore
+    const unsubscribeStats = onSnapshot(collection(db, 'projects'), (snapshot) => {
+      const allProjects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const totalPaguValue = allProjects.reduce((acc: number, p: any) => acc + (p.pagu || 0), 0);
+      
+      // We'll calculate average progress based on latest verified updates (simplified logic for client side)
+      // In a real app, this might be a cloud function or pre-calculated field
+      setStats({
+        totalProjects: allProjects.length,
+        totalPagu: totalPaguValue,
+        avgProgress: 0 // Will update once we have more logic
+      });
     });
+
+    // Listen to projects from Firestore
+    const unsubscribeProjects = onSnapshot(collection(db, 'projects'), (snapshot) => {
+      const projectsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      
+      // For each project, fetch the latest update if available
+      // Note: Real-time listeners for nested collections can be complex, 
+      // but for dashboard preview we just need the info.
+      setProjects(projectsData as any);
+      
+      // Update average progress in stats context if needed
+    });
+
+    return () => {
+      unsubscribeStats();
+      unsubscribeProjects();
+    };
   }, []);
 
   const filteredProjects = projects.filter(p => 
@@ -394,7 +466,11 @@ const ProjectModal = ({
   
   useEffect(() => {
     if (isOpen) {
-      fetch('/api/bidang').then(res => res.json()).then(setBidang);
+      // Fetch bidang from Firestore
+      const unsubscribe = onSnapshot(collection(db, 'bidang'), (snapshot) => {
+        setBidang(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      });
+
       if (project) {
         setFormData({
           nama_paket: project.nama_paket,
@@ -418,25 +494,39 @@ const ProjectModal = ({
           long: '',
         });
       }
+      return () => unsubscribe();
     }
   }, [isOpen, project]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const url = project ? `/api/projects/${project.id}` : '/api/projects';
-    const method = project ? 'PUT' : 'POST';
+    try {
+      const dataToSave = {
+        ...formData,
+        pagu: Number(formData.pagu),
+        nilai_kontrak: Number(formData.nilai_kontrak),
+        tahun_anggaran: Number(formData.tahun_anggaran),
+        lat: formData.lat ? Number(formData.lat) : 0,
+        long: formData.long ? Number(formData.long) : 0,
+        status_verifikasi: project ? (project.status_verifikasi || 0) : 0,
+        updated_at: serverTimestamp()
+      };
 
-    fetch(url, { 
-      method, 
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(formData) 
-    })
-      .then(() => {
-        onRefresh();
-        onClose();
-      });
+      if (project) {
+        await updateDoc(doc(db, 'projects', project.id as any), dataToSave);
+      } else {
+        await addDoc(collection(db, 'projects'), {
+          ...dataToSave,
+          created_at: serverTimestamp()
+        });
+      }
+      onRefresh();
+      onClose();
+    } catch (error) {
+      handleFirestoreError(error, project ? 'update' : 'create', 'projects');
+    }
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -571,19 +661,36 @@ const ProjectList = () => {
   const navigate = useNavigate();
 
   const fetchProjects = () => {
-    fetch(`/api/projects?role=${user?.role}&bidang_id=${user?.bidang_id || ''}`)
-      .then(res => res.json())
-      .then(setProjects);
+    let q = query(collection(db, 'projects'));
+    
+    // Filter by bidang for operator/kabid
+    if ((user?.role === 'operator' || user?.role === 'kabid') && user?.bidang_id) {
+      q = query(collection(db, 'projects'), where('bidang_id', '==', user.bidang_id));
+    }
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const projectsData = snapshot.docs.map(doc => ({ 
+        id: doc.id, 
+        ...doc.data() 
+      } as unknown as Project));
+      setProjects(projectsData);
+    });
+
+    return unsubscribe;
   };
 
   useEffect(() => {
-    fetchProjects();
+    const unsubscribe = fetchProjects();
+    return () => unsubscribe();
   }, [user]);
 
-  const handleDelete = (id: number) => {
+  const handleDelete = async (id: string) => {
     if (confirm('Apakah Anda yakin ingin menghapus proyek ini? Seluruh riwayat update juga akan dihapus.')) {
-      fetch(`/api/projects/${id}`, { method: 'DELETE' })
-        .then(() => fetchProjects());
+      try {
+        await deleteDoc(doc(db, 'projects', id));
+      } catch (error) {
+        handleFirestoreError(error, 'delete', `projects/${id}`);
+      }
     }
   };
 
@@ -716,11 +823,24 @@ const ProjectDetail = () => {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
   const fetchProject = () => {
-    fetch(`/api/projects/${id}`).then(res => res.json()).then(setProject);
+    const unsubProject = onSnapshot(doc(db, 'projects', id!), (docSnap) => {
+      if (docSnap.exists()) {
+        const projectData = { id: docSnap.id, ...docSnap.data() };
+        
+        // Fetch updates subcollection
+        const qUpdates = query(collection(db, 'projects', id!, 'updates'), orderBy('fisik_kumulatif', 'desc'));
+        onSnapshot(qUpdates, (updateSnap) => {
+          const updates = updateSnap.docs.map(u => ({ id: u.id, ...u.data() }));
+          setProject({ ...projectData, updates, photos: [] }); // Simplified photos for now
+        });
+      }
+    });
+    return unsubProject;
   };
 
   useEffect(() => {
-    fetchProject();
+    const unsub = fetchProject();
+    return () => unsub();
   }, [id]);
 
   if (!project) return <div className="p-12 text-center font-black uppercase tracking-widest text-[var(--fg)] transition-colors duration-300">Memuat...</div>;
@@ -943,15 +1063,25 @@ const ProjectDetail = () => {
               <h3 className="text-3xl md:text-4xl font-black uppercase tracking-tighter text-[var(--fg)]">Pembaruan Baru</h3>
               <button onClick={() => setShowUpdateForm(false)} className="text-2xl font-black text-[var(--fg)]">✕</button>
             </div>
-            <form className="grid grid-cols-1 sm:grid-cols-2 gap-6 md:gap-8" onSubmit={(e) => {
+            <form className="grid grid-cols-1 sm:grid-cols-2 gap-6 md:gap-8" onSubmit={async (e) => {
               e.preventDefault();
-              const formData = new FormData(e.currentTarget);
-              formData.append('project_id', id!);
-              fetch('/api/progress', { method: 'POST', body: formData })
-                .then(() => {
-                  setShowUpdateForm(false);
-                  fetchProject();
-                });
+              const fData = new FormData(e.currentTarget);
+              try {
+                const updateData = {
+                  project_id: id!,
+                  fisik_kumulatif: Number(fData.get('fisik_kumulatif')),
+                  keuangan_nominal: Number(fData.get('keuangan_nominal')),
+                  termin_ke: Number(fData.get('termin_ke')),
+                  keterangan_kendala: fData.get('keterangan_kendala'),
+                  status_verifikasi: 0,
+                  created_at: serverTimestamp()
+                };
+                
+                await addDoc(collection(db, 'projects', id!, 'updates'), updateData);
+                setShowUpdateForm(false);
+              } catch (error) {
+                handleFirestoreError(error, 'create', `projects/${id}/updates`);
+              }
             }}>
               <div className="space-y-2">
                 <label className="text-[10px] font-black uppercase tracking-widest opacity-40 text-[var(--fg)]">Progres Fisik (%)</label>
@@ -983,14 +1113,17 @@ const ProjectDetail = () => {
     </div>
   );
 
-  async function handleVerify(progressId: number, status: number) {
+  async function handleVerify(progressId: string, status: number) {
     if (confirm(`Apakah Anda yakin ingin ${status === 1 ? 'menyetujui' : 'menolak'} laporan ini?`)) {
-      await fetch('/api/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ progress_id: progressId, status, role: user?.role })
-      });
-      fetchProject();
+      try {
+        await updateDoc(doc(db, 'projects', id!, 'updates', progressId), {
+          status_verifikasi: status,
+          verified_at: serverTimestamp(),
+          verified_by: user?.id
+        });
+      } catch (error) {
+        handleFirestoreError(error, 'update', `projects/${id}/updates/${progressId}`);
+      }
     }
   }
 };
