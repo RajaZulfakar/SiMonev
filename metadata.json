@@ -1,0 +1,5 @@
+{
+  "name": "E-MON",
+  "description": "Sistem Informasi Monitoring Pembangunan Dinas PUPR Provinsi Kepulauan Riau",
+  "requestFramePermissions": ["geolocation"]
+}
